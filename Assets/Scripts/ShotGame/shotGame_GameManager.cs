@@ -76,7 +76,9 @@ public class shotGame_GameManager : MonoBehaviour
 
     [Header("スタート / リトライボタン")]
     [SerializeField] Button startRetryButton;
-    [SerializeField] TMP_Text startRetryButtonText;
+    [SerializeField] Image startRetryButtonImage;
+    [SerializeField] Sprite startButtonSprite;
+    [SerializeField] Sprite retryButtonSprite;
 
     int initialTimer;
     float timerAccumulator;
@@ -143,7 +145,7 @@ public class shotGame_GameManager : MonoBehaviour
 
         UpdatePointTexts();
         UpdateTimerText();
-        ShowStartRetryButton("スタート");
+        ShowStartRetryButton(startButtonSprite);
     }
 
     async void Start()
@@ -604,7 +606,7 @@ public class shotGame_GameManager : MonoBehaviour
         PlayGameEndBgm();
         timer = 0;
         UpdateTimerText();
-        ShowStartRetryButton("リトライ");
+        ShowStartRetryButton(retryButtonSprite);
 
         Debug.Log($"ゲーム終了 / player0: {point_player0} point / player1: {point_player1} point");
     }
@@ -670,15 +672,47 @@ public class shotGame_GameManager : MonoBehaviour
         bgmAudioSource.Play();
     }
 
-    void ShowStartRetryButton(string label)
+    void ShowStartRetryButton(Sprite buttonSprite)
     {
         if (startRetryButton != null)
         {
             startRetryButton.gameObject.SetActive(true);
         }
-        if (startRetryButtonText != null)
+
+        if (startRetryButtonImage == null && startRetryButton != null)
         {
-            startRetryButtonText.text = label;
+            // ボタン本体に非表示のImageがある場合を考慮し、子のイラストを優先する。
+            Image[] buttonImages = startRetryButton.GetComponentsInChildren<Image>(true);
+            foreach (Image image in buttonImages)
+            {
+                if (image.gameObject == startRetryButton.gameObject) continue;
+
+                startRetryButtonImage = image;
+                break;
+            }
+
+            if (startRetryButtonImage == null)
+            {
+                startRetryButtonImage = startRetryButton.targetGraphic as Image;
+            }
+            if (startRetryButtonImage == null)
+            {
+                startRetryButtonImage = startRetryButton.GetComponent<Image>();
+            }
+        }
+
+        if (startRetryButtonImage != null)
+        {
+            if (buttonSprite != null)
+            {
+                startRetryButtonImage.sprite = buttonSprite;
+            }
+            startRetryButtonImage.enabled = true;
+
+            if (startRetryButton != null)
+            {
+                startRetryButton.targetGraphic = startRetryButtonImage;
+            }
         }
     }
 
