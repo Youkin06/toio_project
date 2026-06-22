@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using toio;
 using Cysharp.Threading.Tasks;
 using TMPro;
+using DG.Tweening;
 
 public class shotGame_GameManager : MonoBehaviour
 {
@@ -63,6 +65,46 @@ public class shotGame_GameManager : MonoBehaviour
         public bool resumeCommandSent;
     }
 
+    sealed class ProgressCubeManager : CubeManager
+    {
+        public ProgressCubeManager(ConnectType type) : base(type)
+        {
+        }
+
+        public async UniTask<Cube[]> MultiConnectWithProgress(
+            int cubeCount,
+            Action<int> onConnectedCountChanged)
+        {
+            BLEPeripheralInterface[] peripherals = await scanner.NearScan(cubeCount);
+            List<Cube> connectedCubes = new List<Cube>();
+            if (peripherals == null) return connectedCubes.ToArray();
+
+            foreach (BLEPeripheralInterface peripheral in peripherals)
+            {
+                if (peripheral == null) continue;
+
+                Cube cube;
+                if (cubeTable.TryGetValue(peripheral.device_address, out cube))
+                {
+                    await connecter.ReConnect(cube);
+                }
+                else
+                {
+                    cube = await connecter.Connect(peripheral);
+                    if (cube != null) AddCube(cube);
+                }
+
+                if (cube != null && cube.isConnected)
+                {
+                    connectedCubes.Add(cube);
+                }
+                onConnectedCountChanged?.Invoke(connectedCubes.Count);
+            }
+
+            return connectedCubes.ToArray();
+        }
+    }
+
     [Header("ポイント")]
     [SerializeField] int point_player0;
     [SerializeField] int point_player1;
@@ -74,11 +116,44 @@ public class shotGame_GameManager : MonoBehaviour
     [SerializeField, Min(1)] int timer = 60;
     [SerializeField] TMP_Text timer_text;
 
+    [Header("得点 / 接続状態 / タイマー演出")]
+    [SerializeField] float connectionStatusY = -210f;
+    [SerializeField] float timerY = 0f;
+    [SerializeField, Min(1f)] float connectionStatusFontSize = 80f;
+    [SerializeField, Min(1f)] float timerFontSize = 100f;
+    [SerializeField, Min(0.1f)] float connectionTypewriterDuration = 1.2f;
+    [SerializeField, Min(0.05f)] float timerMoveDuration = 0.5f;
+    [SerializeField, Min(0.05f)] float scoreAppearDuration = 0.45f;
+    [SerializeField, Min(0f)] float scoreAppearStagger = 0.1f;
+
+    Tween connectionStatusTextTween;
+    Sequence timerUiTween;
+    Sequence scoreUiTween;
+    Vector3 player0ScoreBaseScale = Vector3.one;
+    Vector3 player1ScoreBaseScale = Vector3.one;
+    float player0ScoreBaseAlpha = 1f;
+    float player1ScoreBaseAlpha = 1f;
+
     [Header("スタート / リトライボタン")]
     [SerializeField] Button startRetryButton;
     [SerializeField] Image startRetryButtonImage;
     [SerializeField] Sprite startButtonSprite;
     [SerializeField] Sprite retryButtonSprite;
+
+    [Header("スタート / リトライボタン演出")]
+    [SerializeField, Min(0.05f)] float buttonAppearDuration = 0.4f;
+    [SerializeField, Range(1f, 1.1f)] float buttonIdlePulseScale = 1.025f;
+    [SerializeField, Min(0.1f)] float buttonIdlePulseDuration = 0.8f;
+    [SerializeField, Range(1f, 1.3f)] float buttonHoverScale = 1.08f;
+    [SerializeField, Min(0.05f)] float buttonHoverDuration = 0.15f;
+    [SerializeField, Min(0.05f)] float buttonPressDuration = 0.1f;
+
+    Tween startRetryButtonTween;
+    Vector3 startRetryButtonBaseScale = Vector3.one;
+    bool hasStartRetryButtonBaseScale;
+    bool isStartRetryButtonTransitioning;
+    bool areStartRetryButtonPointerEventsRegistered;
+    bool isPointerOverStartRetryButton;
 
     int initialTimer;
     float timerAccumulator;
@@ -144,7 +219,8 @@ public class shotGame_GameManager : MonoBehaviour
         EnsureBgmAudioSource();
 
         UpdatePointTexts();
-        UpdateTimerText();
+        PrepareScoreUi();
+        PrepareConnectionStatusUi();
         ShowStartRetryButton(startButtonSprite);
     }
 
@@ -156,8 +232,11 @@ public class shotGame_GameManager : MonoBehaviour
             collisionManager = gameObject.AddComponent<collision>();
         }
 
-        cm = new CubeManager(connectType);
-        Cube[] cubes = await cm.MultiConnect(RequiredCubeCount);
+        ProgressCubeManager progressCubeManager = new ProgressCubeManager(connectType);
+        cm = progressCubeManager;
+        Cube[] cubes = await progressCubeManager.MultiConnectWithProgress(
+            RequiredCubeCount,
+            UpdateConnectionStatusText);
 
         if (cubes == null || cubes.Length < RequiredCubeCount)
         {
@@ -537,6 +616,169 @@ public class shotGame_GameManager : MonoBehaviour
         }
     }
 
+    void PrepareScoreUi()
+    {
+        if (point_player0_text != null)
+        {
+            player0ScoreBaseScale = point_player0_text.rectTransform.localScale;
+            player0ScoreBaseAlpha = point_player0_text.color.a;
+            point_player0_text.gameObject.SetActive(false);
+        }
+
+        if (point_player1_text != null)
+        {
+            player1ScoreBaseScale = point_player1_text.rectTransform.localScale;
+            player1ScoreBaseAlpha = point_player1_text.color.a;
+            point_player1_text.gameObject.SetActive(false);
+        }
+    }
+
+    void AnimateScoreUi()
+    {
+        if (scoreUiTween != null)
+        {
+            scoreUiTween.Kill();
+            scoreUiTween = null;
+        }
+
+        scoreUiTween = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(this);
+
+        InsertScoreAppearTween(
+            scoreUiTween,
+            point_player0_text,
+            player0ScoreBaseScale,
+            player0ScoreBaseAlpha,
+            0f);
+        InsertScoreAppearTween(
+            scoreUiTween,
+            point_player1_text,
+            player1ScoreBaseScale,
+            player1ScoreBaseAlpha,
+            scoreAppearStagger);
+    }
+
+    void InsertScoreAppearTween(
+        Sequence sequence,
+        TMP_Text scoreText,
+        Vector3 baseScale,
+        float baseAlpha,
+        float delay)
+    {
+        if (scoreText == null) return;
+
+        scoreText.gameObject.SetActive(true);
+        scoreText.rectTransform.localScale = baseScale * 0.7f;
+        Color color = scoreText.color;
+        color.a = 0f;
+        scoreText.color = color;
+
+        sequence.Insert(
+            delay,
+            scoreText.rectTransform
+                .DOScale(baseScale, scoreAppearDuration)
+                .SetEase(Ease.OutBack));
+        sequence.Insert(
+            delay,
+            scoreText
+                .DOFade(baseAlpha, scoreAppearDuration * 0.75f)
+                .SetEase(Ease.OutQuad));
+    }
+
+    void PrepareConnectionStatusUi()
+    {
+        if (timer_text == null) return;
+
+        RectTransform timerRect = timer_text.rectTransform;
+        Vector2 position = timerRect.anchoredPosition;
+        position.y = connectionStatusY;
+        timerRect.anchoredPosition = position;
+        timer_text.enableAutoSizing = false;
+        timer_text.fontSize = connectionStatusFontSize;
+
+        PlayConnectionStatusTypewriter(0);
+    }
+
+    string GetConnectionStatusMessage(int connectedCount)
+    {
+        int count = Mathf.Clamp(connectedCount, 0, RequiredCubeCount);
+        return $"{count}/{RequiredCubeCount} 個toio が接続されてるよ！";
+    }
+
+    void PlayConnectionStatusTypewriter(int connectedCount)
+    {
+        if (timer_text == null) return;
+
+        if (connectionStatusTextTween != null)
+        {
+            connectionStatusTextTween.Kill();
+            connectionStatusTextTween = null;
+        }
+
+        string fullText = GetConnectionStatusMessage(connectedCount);
+        int visibleCharacterCount = 0;
+        timer_text.text = string.Empty;
+        connectionStatusTextTween = DOTween.To(
+                () => visibleCharacterCount,
+                value =>
+                {
+                    visibleCharacterCount = value;
+                    timer_text.text = fullText.Substring(0, value);
+                },
+                fullText.Length,
+                connectionTypewriterDuration)
+            .SetEase(Ease.Linear)
+            .SetUpdate(true)
+            .SetTarget(timer_text);
+    }
+
+    void UpdateConnectionStatusText(int connectedCount)
+    {
+        if (timer_text == null || isGameRunning) return;
+
+        if (connectionStatusTextTween != null)
+        {
+            connectionStatusTextTween.Kill();
+            connectionStatusTextTween = null;
+        }
+
+        timer_text.text = GetConnectionStatusMessage(connectedCount);
+    }
+
+    void AnimateTimerUiToGamePosition()
+    {
+        if (timer_text == null) return;
+
+        if (connectionStatusTextTween != null)
+        {
+            connectionStatusTextTween.Kill();
+            connectionStatusTextTween = null;
+        }
+        if (timerUiTween != null)
+        {
+            timerUiTween.Kill();
+            timerUiTween = null;
+        }
+
+        timer_text.text = timer.ToString();
+        RectTransform timerRect = timer_text.rectTransform;
+        timerUiTween = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(timer_text);
+        timerUiTween.Join(
+            timerRect
+                .DOAnchorPosY(timerY, timerMoveDuration)
+                .SetEase(Ease.OutCubic));
+        timerUiTween.Join(
+            DOTween.To(
+                    () => timer_text.fontSize,
+                    value => timer_text.fontSize = value,
+                    timerFontSize,
+                    timerMoveDuration)
+                .SetEase(Ease.OutCubic));
+    }
+
     void UpdateTimerText()
     {
         if (timer_text != null)
@@ -569,11 +811,21 @@ public class shotGame_GameManager : MonoBehaviour
     /// </summary>
     public void OnStartRetryButtonPressed()
     {
+        if (isStartRetryButtonTransitioning) return;
+
         if (!cubesReady)
         {
             Debug.LogWarning("Cubeの接続が完了するまで待ってください。");
             return;
         }
+
+        PlayStartRetryButtonPressAnimation();
+    }
+
+    void StartGame()
+    {
+        isStartRetryButtonTransitioning = false;
+        isPointerOverStartRetryButton = false;
 
         point_player0 = 0;
         point_player1 = 0;
@@ -584,10 +836,12 @@ public class shotGame_GameManager : MonoBehaviour
         PlayGameStartBgm();
 
         UpdatePointTexts();
-        UpdateTimerText();
+        AnimateScoreUi();
+        AnimateTimerUiToGamePosition();
 
         if (startRetryButton != null)
         {
+            startRetryButton.transform.localScale = startRetryButtonBaseScale;
             startRetryButton.gameObject.SetActive(false);
         }
         else
@@ -596,6 +850,38 @@ public class shotGame_GameManager : MonoBehaviour
         }
 
         Debug.Log("ゲームスタート");
+    }
+
+    void PlayStartRetryButtonPressAnimation()
+    {
+        if (startRetryButton == null)
+        {
+            StartGame();
+            return;
+        }
+
+        CaptureStartRetryButtonBaseScale();
+        isStartRetryButtonTransitioning = true;
+        startRetryButton.interactable = false;
+        KillStartRetryButtonTween();
+
+        Transform buttonTransform = startRetryButton.transform;
+        buttonTransform.localScale = startRetryButtonBaseScale;
+
+        Sequence pressSequence = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(buttonTransform);
+        pressSequence.Append(
+            buttonTransform.DOScale(startRetryButtonBaseScale * 0.9f, buttonPressDuration)
+                .SetEase(Ease.InQuad));
+        pressSequence.Append(
+            buttonTransform.DOScale(startRetryButtonBaseScale * 1.05f, buttonPressDuration)
+                .SetEase(Ease.OutQuad));
+        pressSequence.Append(
+            buttonTransform.DOScale(startRetryButtonBaseScale, buttonPressDuration)
+                .SetEase(Ease.OutBack));
+        pressSequence.OnComplete(StartGame);
+        startRetryButtonTween = pressSequence;
     }
 
     void FinishGame()
@@ -677,7 +963,11 @@ public class shotGame_GameManager : MonoBehaviour
         if (startRetryButton != null)
         {
             startRetryButton.gameObject.SetActive(true);
+            startRetryButton.interactable = true;
+            RegisterStartRetryButtonPointerEvents();
         }
+
+        isStartRetryButtonTransitioning = false;
 
         if (startRetryButtonImage == null && startRetryButton != null)
         {
@@ -714,6 +1004,146 @@ public class shotGame_GameManager : MonoBehaviour
                 startRetryButton.targetGraphic = startRetryButtonImage;
             }
         }
+
+        PlayStartRetryButtonAppearAnimation();
+    }
+
+    void PlayStartRetryButtonAppearAnimation()
+    {
+        if (startRetryButton == null) return;
+
+        CaptureStartRetryButtonBaseScale();
+        KillStartRetryButtonTween();
+
+        Transform buttonTransform = startRetryButton.transform;
+        buttonTransform.localScale = startRetryButtonBaseScale * 0.75f;
+
+        float targetAlpha = 1f;
+        if (startRetryButtonImage != null)
+        {
+            Color imageColor = startRetryButtonImage.color;
+            targetAlpha = imageColor.a > 0f ? imageColor.a : 1f;
+            imageColor.a = 0f;
+            startRetryButtonImage.color = imageColor;
+        }
+
+        Sequence appearSequence = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(buttonTransform);
+        appearSequence.Append(
+            buttonTransform.DOScale(startRetryButtonBaseScale, buttonAppearDuration)
+                .SetEase(Ease.OutBack));
+
+        if (startRetryButtonImage != null)
+        {
+            appearSequence.Join(
+                startRetryButtonImage.DOFade(targetAlpha, buttonAppearDuration * 0.75f)
+                    .SetEase(Ease.OutQuad));
+        }
+
+        appearSequence.OnComplete(StartStartRetryButtonIdlePulse);
+        startRetryButtonTween = appearSequence;
+    }
+
+    void RegisterStartRetryButtonPointerEvents()
+    {
+        if (areStartRetryButtonPointerEventsRegistered || startRetryButton == null) return;
+
+        EventTrigger eventTrigger = startRetryButton.GetComponent<EventTrigger>();
+        if (eventTrigger == null)
+        {
+            eventTrigger = startRetryButton.gameObject.AddComponent<EventTrigger>();
+        }
+        if (eventTrigger.triggers == null)
+        {
+            eventTrigger.triggers = new List<EventTrigger.Entry>();
+        }
+
+        EventTrigger.Entry pointerEnterEntry = new EventTrigger.Entry
+        {
+            eventID = EventTriggerType.PointerEnter
+        };
+        pointerEnterEntry.callback.AddListener(OnStartRetryButtonPointerEnter);
+        eventTrigger.triggers.Add(pointerEnterEntry);
+
+        EventTrigger.Entry pointerExitEntry = new EventTrigger.Entry
+        {
+            eventID = EventTriggerType.PointerExit
+        };
+        pointerExitEntry.callback.AddListener(OnStartRetryButtonPointerExit);
+        eventTrigger.triggers.Add(pointerExitEntry);
+
+        areStartRetryButtonPointerEventsRegistered = true;
+    }
+
+    void OnStartRetryButtonPointerEnter(BaseEventData eventData)
+    {
+        if (isStartRetryButtonTransitioning || startRetryButton == null) return;
+        if (!startRetryButton.gameObject.activeInHierarchy) return;
+        if (!startRetryButton.interactable) return;
+
+        isPointerOverStartRetryButton = true;
+        AnimateStartRetryButtonScale(startRetryButtonBaseScale * buttonHoverScale);
+    }
+
+    void OnStartRetryButtonPointerExit(BaseEventData eventData)
+    {
+        if (isStartRetryButtonTransitioning || startRetryButton == null) return;
+        if (!startRetryButton.gameObject.activeInHierarchy) return;
+
+        isPointerOverStartRetryButton = false;
+        AnimateStartRetryButtonScale(startRetryButtonBaseScale);
+        startRetryButtonTween.OnComplete(StartStartRetryButtonIdlePulse);
+    }
+
+    void AnimateStartRetryButtonScale(Vector3 targetScale)
+    {
+        KillStartRetryButtonTween();
+
+        if (startRetryButtonImage != null)
+        {
+            Color imageColor = startRetryButtonImage.color;
+            imageColor.a = 1f;
+            startRetryButtonImage.color = imageColor;
+        }
+
+        Transform buttonTransform = startRetryButton.transform;
+        startRetryButtonTween = buttonTransform
+            .DOScale(targetScale, buttonHoverDuration)
+            .SetEase(Ease.OutQuad)
+            .SetUpdate(true)
+            .SetTarget(buttonTransform);
+    }
+
+    void StartStartRetryButtonIdlePulse()
+    {
+        if (startRetryButton == null || !startRetryButton.gameObject.activeInHierarchy) return;
+        if (isStartRetryButtonTransitioning || isPointerOverStartRetryButton) return;
+
+        Transform buttonTransform = startRetryButton.transform;
+        buttonTransform.localScale = startRetryButtonBaseScale;
+        startRetryButtonTween = buttonTransform
+            .DOScale(startRetryButtonBaseScale * buttonIdlePulseScale, buttonIdlePulseDuration)
+            .SetEase(Ease.InOutSine)
+            .SetLoops(-1, LoopType.Yoyo)
+            .SetUpdate(true)
+            .SetTarget(buttonTransform);
+    }
+
+    void CaptureStartRetryButtonBaseScale()
+    {
+        if (hasStartRetryButtonBaseScale || startRetryButton == null) return;
+
+        startRetryButtonBaseScale = startRetryButton.transform.localScale;
+        hasStartRetryButtonBaseScale = true;
+    }
+
+    void KillStartRetryButtonTween()
+    {
+        if (startRetryButtonTween == null) return;
+
+        startRetryButtonTween.Kill();
+        startRetryButtonTween = null;
     }
 
     async UniTask PlayHitReaction(Cube enemy)
@@ -824,6 +1254,11 @@ public class shotGame_GameManager : MonoBehaviour
 
     void OnDestroy()
     {
+        KillStartRetryButtonTween();
+        if (connectionStatusTextTween != null) connectionStatusTextTween.Kill();
+        if (timerUiTween != null) timerUiTween.Kill();
+        if (scoreUiTween != null) scoreUiTween.Kill();
+
         if (player0_cube != null)
         {
             player0_cube.buttonCallback.RemoveListener(Player0ButtonListenerKey);
