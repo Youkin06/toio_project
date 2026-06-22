@@ -1065,10 +1065,10 @@ MonoBehaviour:
   startRetryButtonImage: {fileID: 1706349715}
   startButtonSprite: {fileID: 21300000, guid: 175f1513804f7404c8f9a0181c152b66, type: 3}
   retryButtonSprite: {fileID: 21300000, guid: e9481689df99f4281976df2986a70f17, type: 3}
-  bgmAudioSource: {fileID: 0}
-  gameStartBgm: {fileID: 0}
-  gamePlayingBgm: {fileID: 0}
-  gameEndBgm: {fileID: 0}
+  bgmAudioSource: {fileID: 646743060}
+  gameStartBgm: {fileID: 8300000, guid: 293c1c3c185fe40469de31cf08d321e4, type: 3}
+  gamePlayingBgm: {fileID: 8300000, guid: f245fc10d99f94115a668b0c6055dc15, type: 3}
+  gameEndBgm: {fileID: 8300000, guid: 293c1c3c185fe40469de31cf08d321e4, type: 3}
   bgmVolume: 0.5
   laserRange: 1000
   laserHalfWidth: 1
