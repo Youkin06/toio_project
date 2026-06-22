@@ -1182,6 +1182,11 @@ MonoBehaviour:
   timerMoveDuration: 0.5
   scoreAppearDuration: 0.45
   scoreAppearStagger: 0.1
+  titleLogoRoot: {fileID: 492590806}
+  titleLogoEntranceDuration: 1.5
+  titleLogoIdleInterval: 5
+  titleLogoSwayAngle: 4
+  titleLogoHideDuration: 0.24
   startRetryButton: {fileID: 75368367}
   startRetryButtonImage: {fileID: 1706349715}
   startButtonSprite: {fileID: 21300000, guid: 175f1513804f7404c8f9a0181c152b66, type: 3}

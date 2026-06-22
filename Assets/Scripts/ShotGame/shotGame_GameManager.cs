@@ -134,6 +134,18 @@ public class shotGame_GameManager : MonoBehaviour
     float player0ScoreBaseAlpha = 1f;
     float player1ScoreBaseAlpha = 1f;
 
+    [Header("タイトルロゴ演出")]
+    [SerializeField] RectTransform titleLogoRoot;
+    [SerializeField, Min(0.1f)] float titleLogoEntranceDuration = 1.5f;
+    [SerializeField, Min(1f)] float titleLogoIdleInterval = 5f;
+    [SerializeField, Range(1f, 10f)] float titleLogoSwayAngle = 4f;
+    [SerializeField, Min(0.05f)] float titleLogoHideDuration = 0.24f;
+
+    CanvasGroup titleLogoCanvasGroup;
+    Tween titleLogoTween;
+    Vector3 titleLogoBaseScale = Vector3.one;
+    Vector3 titleLogoBaseEulerAngles;
+
     [Header("スタート / リトライボタン")]
     [SerializeField] Button startRetryButton;
     [SerializeField] Image startRetryButtonImage;
@@ -218,6 +230,7 @@ public class shotGame_GameManager : MonoBehaviour
 
         EnsureBgmAudioSource();
 
+        PrepareTitleLogoAnimation();
         UpdatePointTexts();
         PrepareScoreUi();
         PrepareConnectionStatusUi();
@@ -616,6 +629,166 @@ public class shotGame_GameManager : MonoBehaviour
         }
     }
 
+    void PrepareTitleLogoAnimation()
+    {
+        if (titleLogoRoot == null)
+        {
+            GameObject titleLogoObject = GameObject.Find("title_Logo");
+            if (titleLogoObject != null)
+            {
+                titleLogoRoot = titleLogoObject.GetComponent<RectTransform>();
+            }
+        }
+        if (titleLogoRoot == null)
+        {
+            Debug.LogWarning("タイトルロゴのRectTransformが設定されていません。");
+            return;
+        }
+
+        titleLogoBaseScale = titleLogoRoot.localScale;
+        titleLogoBaseEulerAngles = titleLogoRoot.localEulerAngles;
+        titleLogoCanvasGroup = titleLogoRoot.GetComponent<CanvasGroup>();
+        if (titleLogoCanvasGroup == null)
+        {
+            titleLogoCanvasGroup = titleLogoRoot.gameObject.AddComponent<CanvasGroup>();
+        }
+        titleLogoCanvasGroup.interactable = false;
+        titleLogoCanvasGroup.blocksRaycasts = false;
+
+        PlayTitleLogoEntranceAnimation();
+    }
+
+    void PlayTitleLogoEntranceAnimation()
+    {
+        if (titleLogoRoot == null) return;
+
+        KillTitleLogoTween();
+        titleLogoRoot.gameObject.SetActive(true);
+        titleLogoRoot.localScale = titleLogoBaseScale * 0.08f;
+        titleLogoRoot.localEulerAngles = titleLogoBaseEulerAngles;
+        titleLogoCanvasGroup.alpha = 0f;
+
+        Sequence entranceSequence = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(titleLogoRoot);
+        entranceSequence.Append(
+            titleLogoRoot
+                .DOScale(titleLogoBaseScale, titleLogoEntranceDuration)
+                .SetEase(Ease.OutCubic));
+        entranceSequence.Join(
+            titleLogoRoot
+                .DOLocalRotate(
+                    titleLogoBaseEulerAngles + Vector3.forward * 360f,
+                    titleLogoEntranceDuration,
+                    RotateMode.FastBeyond360)
+                .SetEase(Ease.OutCubic));
+        entranceSequence.Join(
+            titleLogoCanvasGroup
+                .DOFade(1f, titleLogoEntranceDuration * 0.3f)
+                .SetEase(Ease.OutQuad));
+
+        // 着地時に一度沈み込んでから、「どん」と弾む。
+        entranceSequence.Append(
+            titleLogoRoot
+                .DOScale(titleLogoBaseScale * 0.88f, 0.1f)
+                .SetEase(Ease.InQuad));
+        entranceSequence.Append(
+            titleLogoRoot
+                .DOScale(titleLogoBaseScale * 1.08f, 0.14f)
+                .SetEase(Ease.OutBack));
+        entranceSequence.Append(
+            titleLogoRoot
+                .DOScale(titleLogoBaseScale, 0.12f)
+                .SetEase(Ease.OutQuad));
+        entranceSequence.AppendCallback(StartTitleLogoIdleAnimation);
+
+        titleLogoTween = entranceSequence;
+    }
+
+    void StartTitleLogoIdleAnimation()
+    {
+        if (titleLogoRoot == null || !titleLogoRoot.gameObject.activeInHierarchy) return;
+
+        titleLogoRoot.localScale = titleLogoBaseScale;
+        titleLogoRoot.localEulerAngles = titleLogoBaseEulerAngles;
+
+        Sequence idleSequence = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(titleLogoRoot);
+        idleSequence.AppendInterval(titleLogoIdleInterval);
+        idleSequence.Append(
+            titleLogoRoot
+                .DOLocalRotate(
+                    titleLogoBaseEulerAngles + Vector3.forward * titleLogoSwayAngle,
+                    0.14f)
+                .SetEase(Ease.OutQuad));
+        idleSequence.Append(
+            titleLogoRoot
+                .DOLocalRotate(
+                    titleLogoBaseEulerAngles - Vector3.forward * titleLogoSwayAngle,
+                    0.26f)
+                .SetEase(Ease.InOutSine));
+        idleSequence.Append(
+            titleLogoRoot
+                .DOLocalRotate(
+                    titleLogoBaseEulerAngles + Vector3.forward * (titleLogoSwayAngle * 0.45f),
+                    0.18f)
+                .SetEase(Ease.InOutSine));
+        idleSequence.Append(
+            titleLogoRoot
+                .DOLocalRotate(titleLogoBaseEulerAngles, 0.12f)
+                .SetEase(Ease.OutQuad));
+        idleSequence.SetLoops(-1, LoopType.Restart);
+
+        titleLogoTween = idleSequence;
+    }
+
+    void PlayTitleLogoHideAnimation()
+    {
+        if (titleLogoRoot == null || !titleLogoRoot.gameObject.activeInHierarchy) return;
+
+        KillTitleLogoTween();
+
+        Sequence hideSequence = DOTween.Sequence()
+            .SetUpdate(true)
+            .SetTarget(titleLogoRoot);
+        hideSequence.Append(
+            titleLogoRoot
+                .DOScale(titleLogoBaseScale * 1.06f, 0.06f)
+                .SetEase(Ease.OutQuad));
+        hideSequence.Join(
+            titleLogoRoot
+                .DOLocalRotate(
+                    titleLogoBaseEulerAngles - Vector3.forward * 5f,
+                    0.06f)
+                .SetEase(Ease.OutQuad));
+        hideSequence.Append(
+            titleLogoRoot
+                .DOScale(titleLogoBaseScale * 0.05f, titleLogoHideDuration)
+                .SetEase(Ease.InBack));
+        hideSequence.Join(
+            titleLogoRoot
+                .DOLocalRotate(
+                    titleLogoBaseEulerAngles + Vector3.forward * 18f,
+                    titleLogoHideDuration)
+                .SetEase(Ease.InQuad));
+        hideSequence.Join(
+            titleLogoCanvasGroup
+                .DOFade(0f, titleLogoHideDuration * 0.8f)
+                .SetEase(Ease.InQuad));
+        hideSequence.OnComplete(() => titleLogoRoot.gameObject.SetActive(false));
+
+        titleLogoTween = hideSequence;
+    }
+
+    void KillTitleLogoTween()
+    {
+        if (titleLogoTween == null) return;
+
+        titleLogoTween.Kill();
+        titleLogoTween = null;
+    }
+
     void PrepareScoreUi()
     {
         if (point_player0_text != null)
@@ -819,6 +992,7 @@ public class shotGame_GameManager : MonoBehaviour
             return;
         }
 
+        PlayTitleLogoHideAnimation();
         PlayStartRetryButtonPressAnimation();
     }
 
@@ -1255,6 +1429,7 @@ public class shotGame_GameManager : MonoBehaviour
     void OnDestroy()
     {
         KillStartRetryButtonTween();
+        KillTitleLogoTween();
         if (connectionStatusTextTween != null) connectionStatusTextTween.Kill();
         if (timerUiTween != null) timerUiTween.Kill();
         if (scoreUiTween != null) scoreUiTween.Kill();
