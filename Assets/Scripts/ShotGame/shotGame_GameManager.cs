@@ -9,6 +9,7 @@ using TMPro;
 public class shotGame_GameManager : MonoBehaviour
 {
     const int RequiredCubeCount = 6;
+    const int PatrolTargetCount = 4;
     const string Player0ButtonListenerKey = "shotGame_Player0Button";
     const string Player1ButtonListenerKey = "shotGame_Player1Button";
     const string HitReactionListenerKey = "shotGame_HitReaction";
@@ -35,8 +36,32 @@ public class shotGame_GameManager : MonoBehaviour
 
     Cube[] allEnemies;
     collision collisionManager;
-    readonly Dictionary<Cube, int> activeHitReactions = new Dictionary<Cube, int>();
+    readonly Dictionary<Cube, HitReactionState> activeHitReactions =
+        new Dictionary<Cube, HitReactionState>();
+    readonly Dictionary<Cube, int> patrolTargetIndices = new Dictionary<Cube, int>();
     int nextHitReactionConfigId = 100;
+
+    enum HitReactionPhase
+    {
+        Rotating,
+        WaitingForMovement
+    }
+
+    enum BgmPlaybackState
+    {
+        None,
+        GameStart,
+        GamePlaying,
+        GameEnd
+    }
+
+    sealed class HitReactionState
+    {
+        public int configId;
+        public HitReactionPhase phase;
+        public Vector2 resumePosition;
+        public bool resumeCommandSent;
+    }
 
     [Header("ポイント")]
     [SerializeField] int point_player0;
@@ -58,11 +83,52 @@ public class shotGame_GameManager : MonoBehaviour
     bool isGameRunning;
     bool cubesReady;
 
+    [Header("BGM")]
+    [Tooltip("未設定の場合はこのGameObjectにAudioSourceを自動追加する")]
+    [SerializeField] AudioSource bgmAudioSource;
+    [Tooltip("スタートボタン押下時に1回再生する曲。終了後にゲーム中BGMへ切り替える")]
+    [SerializeField] AudioClip gameStartBgm;
+    [Tooltip("ゲーム中にループ再生する曲")]
+    [SerializeField] AudioClip gamePlayingBgm;
+    [Tooltip("ゲーム終了後のリトライ画面でループ再生する曲")]
+    [SerializeField] AudioClip gameEndBgm;
+    [SerializeField, Range(0f, 1f)] float bgmVolume = 0.5f;
+
+    BgmPlaybackState bgmPlaybackState;
+
     [Header("レーザー設定")]
     [Tooltip("レーザーの射程（toioマットの座標単位）")]
     [SerializeField] float laserRange = 300f;
     [Tooltip("レーザーの中心線から左右に当たる幅")]
     [SerializeField] float laserHalfWidth = 1f;
+
+    [Header("敵の移動設定")]
+    [SerializeField, Range(10, 100)] int enemySpeed = 70;
+    [SerializeField, Range(10, 100)] int enemyTurnSpeed = 55;
+    [SerializeField, Min(50)] int enemyMoveDurationMs = 200;
+    [Tooltip("巡回目的地を次へ切り替える距離")]
+    [SerializeField, Min(5f)] float patrolTargetReachDistance = 10f;
+    [Tooltip("目的地への移動中に左右へ蛇行する角度")]
+    [SerializeField, Range(0f, 30f)] float patrolSwerveAngle = 12f;
+    [Tooltip("蛇行の左右を切り替える周期（秒）")]
+    [SerializeField, Min(1f)] float patrolSwervePeriod = 2.4f;
+    [Tooltip("この距離より近い敵がいる場合は回避する")]
+    [SerializeField, Min(20f)] float enemyAvoidanceDistance = 45f;
+    [Tooltip("密着時に後退して離れる距離")]
+    [SerializeField, Min(20f)] float enemyEscapeDistance = 34f;
+
+    [Header("マット範囲")]
+    [Tooltip("簡易プレイマットの初期値。使用マットに合わせてInspectorから変更する")]
+    [SerializeField] int matMinX = 98;
+    [SerializeField] int matMaxX = 402;
+    [SerializeField] int matMinY = 142;
+    [SerializeField] int matMaxY = 358;
+    [Tooltip("キューブ中心がマット端に近づかないための余白")]
+    [SerializeField, Min(12f)] float matSafetyMargin = 15f;
+    [Tooltip("進行方向のこの距離先が安全範囲外なら事前に旋回する")]
+    [SerializeField, Min(10f)] float edgeLookAheadDistance = 12f;
+    [Tooltip("被弾後、この距離だけ座標が変わったら再移動開始とみなす")]
+    [SerializeField, Min(1f)] float hitResumeDistance = 5f;
 
     void Awake()
     {
@@ -71,6 +137,9 @@ public class shotGame_GameManager : MonoBehaviour
         point_player0 = 0;
         point_player1 = 0;
         isGameRunning = false;
+        bgmPlaybackState = BgmPlaybackState.None;
+
+        EnsureBgmAudioSource();
 
         UpdatePointTexts();
         UpdateTimerText();
@@ -124,6 +193,7 @@ public class shotGame_GameManager : MonoBehaviour
             enemy.targetMoveCallback.AddListener(HitReactionListenerKey, OnHitRotationCompleted);
         }
 
+        SetEnemyRoleLeds();
         cubesReady = true;
         Debug.Log("[Cube割り当て] 6台すべての役割を設定しました。");
     }
@@ -154,18 +224,228 @@ public class shotGame_GameManager : MonoBehaviour
 
     void Update()
     {
+        UpdateBgm();
         UpdateTimer();
 
         if (!isGameRunning || cm == null || allEnemies == null) return;
 
         foreach (Cube enemy in allEnemies)
         {
-            if (enemy == null || activeHitReactions.ContainsKey(enemy)) continue;
-            if (cm.IsControllable(enemy))
+            if (enemy == null) continue;
+
+            if (activeHitReactions.TryGetValue(enemy, out HitReactionState hitState))
             {
-                enemy.Move(100, 70, 200);
+                if (hitState.phase == HitReactionPhase.Rotating) continue;
+
+                bool sentTranslationCommand = MoveEnemy(enemy);
+                if (sentTranslationCommand && !hitState.resumeCommandSent)
+                {
+                    hitState.resumePosition = enemy.pos;
+                    hitState.resumeCommandSent = true;
+                }
+
+                // 命令送信だけではなく、実機の座標変化を確認してから再弾を許可する。
+                if (hitState.resumeCommandSent
+                    && Vector2.Distance(hitState.resumePosition, enemy.pos) >= hitResumeDistance)
+                {
+                    activeHitReactions.Remove(enemy);
+                    Debug.Log($"{enemy.localName}が再移動したため、被弾判定を再開しました。");
+                }
+
+                continue;
             }
+
+            MoveEnemy(enemy);
         }
+    }
+
+    /// <summary>
+    /// マット端と他の敵を回避しながら移動する。
+    /// 平行移動を含む命令を送った場合だけtrueを返す。
+    /// </summary>
+    bool MoveEnemy(Cube enemy)
+    {
+        if (enemy == null || cm == null || !cm.IsControllable(enemy)) return false;
+
+        if (!enemy.isGrounded)
+        {
+            enemy.Move(0, 0, 100, Cube.ORDER_TYPE.Strong);
+            return false;
+        }
+
+        int enemyIndex = Array.IndexOf(allEnemies, enemy);
+        Cube nearestEnemy = FindNearestEnemy(enemy, out float nearestDistance);
+        bool mustReturnToMatCenter = MustReturnToMatCenter(enemy);
+
+        // 密着した場合は、偶数・奇数で旋回方向を分けて完全対称の行き詰まりを防ぐ。
+        // マット端では後退が落下につながるため、中央への復帰を優先する。
+        if (!mustReturnToMatCenter
+            && nearestEnemy != null
+            && (nearestDistance <= enemyEscapeDistance || enemy.isCollisionDetected))
+        {
+            int curve = enemyIndex % 2 == 0 ? 25 : -25;
+            int left = Mathf.Clamp(-enemySpeed + curve, -100, 100);
+            int right = Mathf.Clamp(-enemySpeed - curve, -100, 100);
+            enemy.Move(left, right, enemyMoveDurationMs, Cube.ORDER_TYPE.Strong);
+            return true;
+        }
+
+        if (mustReturnToMatCenter)
+        {
+            // 落下防止だけはその場で中央方向へ向き直す。
+            return MoveTowardDirection(enemy, GetMatCenter() - enemy.pos, true);
+        }
+
+        if (nearestEnemy != null && nearestDistance <= enemyAvoidanceDistance)
+        {
+            // 回避中も停止して方向転換せず、前進しながら大きく曲がる。
+            return MoveTowardDirection(enemy, enemy.pos - nearestEnemy.pos, false);
+        }
+
+        return MoveAcrossMat(enemy, enemyIndex);
+    }
+
+    bool MoveTowardDirection(
+        Cube enemy,
+        Vector2 desiredDirection,
+        bool allowStationaryTurn,
+        float desiredAngleOffset = 0f,
+        int forwardSpeedOverride = -1)
+    {
+        if (desiredDirection.sqrMagnitude < 0.01f) return false;
+
+        float desiredAngle = Mathf.Atan2(desiredDirection.y, desiredDirection.x) * Mathf.Rad2Deg
+            + desiredAngleOffset;
+        float angleDifference = Mathf.DeltaAngle(enemy.angle, desiredAngle);
+
+        if (allowStationaryTurn && Mathf.Abs(angleDifference) > 20f)
+        {
+            int turn = angleDifference > 0f ? enemyTurnSpeed : -enemyTurnSpeed;
+            enemy.Move(turn, -turn, enemyMoveDurationMs);
+            return false;
+        }
+
+        float steeringGain = allowStationaryTurn ? 0.8f : 1.2f;
+        int steering = Mathf.RoundToInt(Mathf.Clamp(angleDifference * steeringGain,
+            -enemyTurnSpeed, enemyTurnSpeed));
+        int forwardSpeed = forwardSpeedOverride >= 0
+            ? forwardSpeedOverride
+            : allowStationaryTurn
+                ? enemySpeed
+                : Mathf.Max(30, Mathf.RoundToInt(enemySpeed * 0.65f));
+        int moveLeft = Mathf.Clamp(forwardSpeed + steering, -100, 100);
+        int moveRight = Mathf.Clamp(forwardSpeed - steering, -100, 100);
+        enemy.Move(moveLeft, moveRight, enemyMoveDurationMs);
+        return true;
+    }
+
+    bool MoveAcrossMat(Cube enemy, int enemyIndex)
+    {
+        Vector2 patrolTarget = GetPatrolTarget(enemy, enemyIndex);
+
+        // 目的地へ直進し続けないよう、機体ごとに位相をずらして蛇行させる。
+        float phaseOffset = Mathf.Max(0, enemyIndex) * 0.7f;
+        float period = Mathf.Max(1f, patrolSwervePeriod);
+        float swerve = Mathf.Sin((Time.time + phaseOffset) * Mathf.PI * 2f / period)
+            * patrolSwerveAngle;
+
+        return MoveTowardDirection(
+            enemy,
+            patrolTarget - enemy.pos,
+            false,
+            swerve,
+            enemySpeed);
+    }
+
+    Vector2 GetPatrolTarget(Cube enemy, int enemyIndex)
+    {
+        if (!patrolTargetIndices.TryGetValue(enemy, out int targetIndex))
+        {
+            // 初期目的地を全台で分散させる。
+            targetIndex = PositiveModulo(Mathf.Max(0, enemyIndex) * 3, PatrolTargetCount);
+            patrolTargetIndices[enemy] = targetIndex;
+        }
+
+        Vector2 patrolTarget = GetPatrolTargetPosition(targetIndex);
+        if (Vector2.Distance(enemy.pos, patrolTarget) <= patrolTargetReachDistance)
+        {
+            // 全台が同じ巡回方向で、異なる区間を移動するため、正面衝突しにくい。
+            targetIndex = PositiveModulo(targetIndex + 1, PatrolTargetCount);
+            patrolTargetIndices[enemy] = targetIndex;
+            patrolTarget = GetPatrolTargetPosition(targetIndex);
+        }
+
+        return patrolTarget;
+    }
+
+    Vector2 GetPatrolTargetPosition(int targetIndex)
+    {
+        float inset = matSafetyMargin + edgeLookAheadDistance + 2f;
+        float minX = Mathf.Min(matMinX, matMaxX) + inset;
+        float maxX = Mathf.Max(matMinX, matMaxX) - inset;
+        float minY = Mathf.Min(matMinY, matMaxY) + inset;
+        float maxY = Mathf.Max(matMinY, matMaxY) - inset;
+
+        // 対角線移動を含む順番にし、マット全体を横切らせる。
+        switch (PositiveModulo(targetIndex, PatrolTargetCount))
+        {
+            case 0: return new Vector2(minX, minY);
+            case 1: return new Vector2(maxX, maxY);
+            case 2: return new Vector2(minX, maxY);
+            default: return new Vector2(maxX, minY);
+        }
+    }
+
+    int PositiveModulo(int value, int modulus)
+    {
+        int result = value % modulus;
+        return result < 0 ? result + modulus : result;
+    }
+
+    Cube FindNearestEnemy(Cube source, out float nearestDistance)
+    {
+        nearestDistance = float.MaxValue;
+        Cube nearest = null;
+        if (allEnemies == null) return null;
+
+        foreach (Cube candidate in allEnemies)
+        {
+            if (candidate == null || candidate == source || !candidate.isGrounded) continue;
+
+            float distance = Vector2.Distance(source.pos, candidate.pos);
+            if (distance >= nearestDistance) continue;
+
+            nearestDistance = distance;
+            nearest = candidate;
+        }
+
+        return nearest;
+    }
+
+    bool MustReturnToMatCenter(Cube enemy)
+    {
+        float safeMinX = Mathf.Min(matMinX, matMaxX) + matSafetyMargin;
+        float safeMaxX = Mathf.Max(matMinX, matMaxX) - matSafetyMargin;
+        float safeMinY = Mathf.Min(matMinY, matMaxY) + matSafetyMargin;
+        float safeMaxY = Mathf.Max(matMinY, matMaxY) - matSafetyMargin;
+
+        float headingRad = enemy.angle * Mathf.Deg2Rad;
+        Vector2 heading = new Vector2(Mathf.Cos(headingRad), Mathf.Sin(headingRad));
+        Vector2 lookAheadPosition = enemy.pos + heading * edgeLookAheadDistance;
+
+        return !IsInside(enemy.pos, safeMinX, safeMaxX, safeMinY, safeMaxY)
+            || !IsInside(lookAheadPosition, safeMinX, safeMaxX, safeMinY, safeMaxY);
+    }
+
+    bool IsInside(Vector2 position, float minX, float maxX, float minY, float maxY)
+    {
+        return position.x >= minX && position.x <= maxX
+            && position.y >= minY && position.y <= maxY;
+    }
+
+    Vector2 GetMatCenter()
+    {
+        return new Vector2((matMinX + matMaxX) * 0.5f, (matMinY + matMaxY) * 0.5f);
     }
 
     void OnPlayerButtonChanged(Cube player)
@@ -205,6 +485,13 @@ public class shotGame_GameManager : MonoBehaviour
             return;
         }
 
+        // 被弾中の敵はレーザーを遮るが、再移動するまで得点対象にしない。
+        if (activeHitReactions.ContainsKey(hitEnemy))
+        {
+            Debug.Log($"{playerName}のレーザーは被弾中の {hitEnemy.localName} に当たった（得点なし）");
+            return;
+        }
+
         bool isCorrectTarget = hitEnemy == enemy0 || hitEnemy == enemy1;
         if (isCorrectTarget)
         {
@@ -217,7 +504,7 @@ public class shotGame_GameManager : MonoBehaviour
             AddPoint(player, -100);
         }
 
-        PlayHitReaction(hitEnemy, isCorrectTarget).Forget();
+        PlayHitReaction(hitEnemy).Forget();
     }
 
     void AddPoint(Cube player, int amount)
@@ -290,7 +577,9 @@ public class shotGame_GameManager : MonoBehaviour
         point_player1 = 0;
         timer = initialTimer;
         timerAccumulator = 0f;
+        activeHitReactions.Clear();
         isGameRunning = true;
+        PlayGameStartBgm();
 
         UpdatePointTexts();
         UpdateTimerText();
@@ -310,11 +599,75 @@ public class shotGame_GameManager : MonoBehaviour
     void FinishGame()
     {
         isGameRunning = false;
+        activeHitReactions.Clear();
+        StopAllEnemies();
+        PlayGameEndBgm();
         timer = 0;
         UpdateTimerText();
         ShowStartRetryButton("リトライ");
 
         Debug.Log($"ゲーム終了 / player0: {point_player0} point / player1: {point_player1} point");
+    }
+
+    void EnsureBgmAudioSource()
+    {
+        if (bgmAudioSource == null)
+        {
+            bgmAudioSource = GetComponent<AudioSource>();
+        }
+        if (bgmAudioSource == null)
+        {
+            bgmAudioSource = gameObject.AddComponent<AudioSource>();
+        }
+
+        bgmAudioSource.playOnAwake = false;
+        bgmAudioSource.spatialBlend = 0f;
+        bgmAudioSource.volume = bgmVolume;
+    }
+
+    void UpdateBgm()
+    {
+        if (!isGameRunning || bgmPlaybackState != BgmPlaybackState.GameStart) return;
+        if (bgmAudioSource != null && bgmAudioSource.isPlaying) return;
+
+        PlayGamePlayingBgm();
+    }
+
+    void PlayGameStartBgm()
+    {
+        bgmPlaybackState = BgmPlaybackState.GameStart;
+        if (gameStartBgm == null)
+        {
+            PlayGamePlayingBgm();
+            return;
+        }
+
+        PlayBgmClip(gameStartBgm, false);
+    }
+
+    void PlayGamePlayingBgm()
+    {
+        bgmPlaybackState = BgmPlaybackState.GamePlaying;
+        PlayBgmClip(gamePlayingBgm, true);
+    }
+
+    void PlayGameEndBgm()
+    {
+        bgmPlaybackState = BgmPlaybackState.GameEnd;
+        PlayBgmClip(gameEndBgm, true);
+    }
+
+    void PlayBgmClip(AudioClip clip, bool loop)
+    {
+        EnsureBgmAudioSource();
+        bgmAudioSource.Stop();
+
+        if (clip == null) return;
+
+        bgmAudioSource.clip = clip;
+        bgmAudioSource.loop = loop;
+        bgmAudioSource.volume = bgmVolume;
+        bgmAudioSource.Play();
     }
 
     void ShowStartRetryButton(string label)
@@ -329,19 +682,24 @@ public class shotGame_GameManager : MonoBehaviour
         }
     }
 
-    async UniTask PlayHitReaction(Cube enemy, bool isCorrectTarget)
+    async UniTask PlayHitReaction(Cube enemy)
     {
         if (enemy == null) return;
 
-        // 既に被弾リアクション中なら、LED色の更新だけ行う。
+        // FireLaser側で得点を防ぐが、非同期の競合にも備える。
         if (activeHitReactions.ContainsKey(enemy))
         {
-            TurnOnHitLed(enemy, isCorrectTarget);
             return;
         }
 
         int configId = GetNextHitReactionConfigId();
-        activeHitReactions[enemy] = configId;
+        activeHitReactions[enemy] = new HitReactionState
+        {
+            configId = configId,
+            phase = HitReactionPhase.Rotating,
+            resumePosition = enemy.pos,
+            resumeCommandSent = false
+        };
 
         enemy.Move(0, 0, 100, Cube.ORDER_TYPE.Strong);
         enemy.TargetMove(
@@ -356,29 +714,41 @@ public class shotGame_GameManager : MonoBehaviour
             targetRotationType: Cube.TargetRotationType.RelativeClockwise,
             order: Cube.ORDER_TYPE.Strong
         );
-        TurnOnHitLed(enemy, isCorrectTarget);
+        // 被弾後もデバッグ用の担当色を維持する。
+        TurnOnEnemyRoleLed(enemy);
         enemy.PlayPresetSound(2, 255, Cube.ORDER_TYPE.Strong);
 
         await UniTask.Delay(3500);
 
-        if (activeHitReactions.TryGetValue(enemy, out int activeConfigId)
-            && activeConfigId == configId)
+        if (activeHitReactions.TryGetValue(enemy, out HitReactionState hitState)
+            && hitState.configId == configId
+            && hitState.phase == HitReactionPhase.Rotating)
         {
             enemy.Move(0, 0, 100, Cube.ORDER_TYPE.Strong);
-            activeHitReactions.Remove(enemy);
+            BeginWaitingForMovement(enemy, hitState);
         }
     }
 
-    void TurnOnHitLed(Cube enemy, bool isCorrectTarget)
+    void SetEnemyRoleLeds()
     {
-        // 正しい敵なら青、担当外の敵なら赤に点灯する。
-        if (isCorrectTarget)
+        TurnOnEnemyRoleLed(enemy0_player0_cube);
+        TurnOnEnemyRoleLed(enemy1_player0_cube);
+        TurnOnEnemyRoleLed(enemy0_player1_cube);
+        TurnOnEnemyRoleLed(enemy1_player1_cube);
+    }
+
+    void TurnOnEnemyRoleLed(Cube enemy)
+    {
+        if (enemy == null) return;
+
+        // durationMs=0で、次のLED命令まで点灯を維持する。
+        if (enemy == enemy0_player0_cube || enemy == enemy1_player0_cube)
         {
-            enemy.TurnLedOn(0, 0, 255, 1500, Cube.ORDER_TYPE.Strong);
+            enemy.TurnLedOn(0, 0, 255, 0, Cube.ORDER_TYPE.Strong);
         }
-        else
+        else if (enemy == enemy0_player1_cube || enemy == enemy1_player1_cube)
         {
-            enemy.TurnLedOn(255, 0, 0, 1500, Cube.ORDER_TYPE.Strong);
+            enemy.TurnLedOn(255, 0, 0, 0, Cube.ORDER_TYPE.Strong);
         }
     }
 
@@ -392,10 +762,30 @@ public class shotGame_GameManager : MonoBehaviour
 
     void OnHitRotationCompleted(Cube enemy, int configId, Cube.TargetMoveRespondType response)
     {
-        if (!activeHitReactions.TryGetValue(enemy, out int activeConfigId)) return;
-        if (activeConfigId != configId) return;
+        if (!activeHitReactions.TryGetValue(enemy, out HitReactionState hitState)) return;
+        if (hitState.configId != configId) return;
 
-        activeHitReactions.Remove(enemy);
+        BeginWaitingForMovement(enemy, hitState);
+    }
+
+    void BeginWaitingForMovement(Cube enemy, HitReactionState hitState)
+    {
+        if (hitState.phase == HitReactionPhase.WaitingForMovement) return;
+
+        hitState.phase = HitReactionPhase.WaitingForMovement;
+        hitState.resumePosition = enemy.pos;
+        hitState.resumeCommandSent = false;
+    }
+
+    void StopAllEnemies()
+    {
+        if (allEnemies == null) return;
+
+        foreach (Cube enemy in allEnemies)
+        {
+            if (enemy == null) continue;
+            enemy.Move(0, 0, 100, Cube.ORDER_TYPE.Strong);
+        }
     }
 
     void OnDestroy()
