@@ -11,10 +11,9 @@ using DG.Tweening;
 public class shotGame_GameManager : MonoBehaviour
 {
     const int RequiredCubeCount = 6;
-    const int PatrolTargetCount = 4;
+    const int EnemyCount = 4;
     const string Player0ButtonListenerKey = "shotGame_Player0Button";
     const string Player1ButtonListenerKey = "shotGame_Player1Button";
-    const string HitReactionListenerKey = "shotGame_HitReaction";
 
     // 6台確認時に取得した、各toioのBLEアドレス。
     const string Player0Address = "A201BF83-C425-BD5A-658A-F86C66453C78";
@@ -40,13 +39,19 @@ public class shotGame_GameManager : MonoBehaviour
     collision collisionManager;
     readonly Dictionary<Cube, HitReactionState> activeHitReactions =
         new Dictionary<Cube, HitReactionState>();
-    readonly Dictionary<Cube, int> patrolTargetIndices = new Dictionary<Cube, int>();
-    int nextHitReactionConfigId = 100;
 
-    enum HitReactionPhase
+    enum EnemyFormationState
     {
-        Rotating,
-        WaitingForMovement
+        None,
+        WaitingForGame,
+        Running
+    }
+
+    enum EnemyFormationPattern
+    {
+        CoffeeCup,
+        WideCircle,
+        FigureEight
     }
 
     enum BgmPlaybackState
@@ -59,10 +64,7 @@ public class shotGame_GameManager : MonoBehaviour
 
     sealed class HitReactionState
     {
-        public int configId;
-        public HitReactionPhase phase;
-        public Vector2 resumePosition;
-        public bool resumeCommandSent;
+        public float invulnerableUntil;
     }
 
     sealed class ProgressCubeManager : CubeManager
@@ -195,16 +197,30 @@ public class shotGame_GameManager : MonoBehaviour
     [SerializeField, Range(10, 100)] int enemySpeed = 70;
     [SerializeField, Range(10, 100)] int enemyTurnSpeed = 55;
     [SerializeField, Min(50)] int enemyMoveDurationMs = 200;
-    [Tooltip("巡回目的地を次へ切り替える距離")]
-    [SerializeField, Min(5f)] float patrolTargetReachDistance = 10f;
-    [Tooltip("目的地への移動中に左右へ蛇行する角度")]
-    [SerializeField, Range(0f, 30f)] float patrolSwerveAngle = 12f;
-    [Tooltip("蛇行の左右を切り替える周期（秒）")]
-    [SerializeField, Min(1f)] float patrolSwervePeriod = 2.4f;
     [Tooltip("この距離より近い敵がいる場合は回避する")]
     [SerializeField, Min(20f)] float enemyAvoidanceDistance = 45f;
     [Tooltip("密着時に後退して離れる距離")]
     [SerializeField, Min(20f)] float enemyEscapeDistance = 34f;
+
+    [Header("敵の編隊パターン")]
+    [Tooltip("各パターンを継続する時間（秒）")]
+    [SerializeField, Min(2f)] float formationPatternDuration = 14f;
+    [Tooltip("パターン内の規則運動が1周する時間（秒）")]
+    [SerializeField, Min(2f)] float formationCycleDuration = 9f;
+    [Tooltip("マット全体を使う周回の長軸半径")]
+    [SerializeField, Min(25f)] float formationLongitudinalOffset = 105f;
+    [Tooltip("マット全体を使う周回の短軸半径")]
+    [SerializeField, Min(20f)] float formationLaneOffset = 62f;
+    [Tooltip("コーヒーカップ風の内側回転半径")]
+    [SerializeField, Min(5f)] float formationGateOffset = 14f;
+    readonly Vector2[] enemyFormationTargets = new Vector2[EnemyCount];
+    EnemyFormationState enemyFormationState;
+    EnemyFormationPattern currentFormationPattern;
+    int previousFormationPatternIndex = -1;
+    float formationPatternStartedAt;
+    Vector2 formationForwardAxis = Vector2.right;
+    Vector2 formationLateralAxis = Vector2.up;
+    float formationLayoutScale = 1f;
 
     [Header("マット範囲")]
     [Tooltip("簡易プレイマットの初期値。使用マットに合わせてInspectorから変更する")]
@@ -216,8 +232,12 @@ public class shotGame_GameManager : MonoBehaviour
     [SerializeField, Min(12f)] float matSafetyMargin = 15f;
     [Tooltip("進行方向のこの距離先が安全範囲外なら事前に旋回する")]
     [SerializeField, Min(10f)] float edgeLookAheadDistance = 12f;
-    [Tooltip("被弾後、この距離だけ座標が変わったら再移動開始とみなす")]
-    [SerializeField, Min(1f)] float hitResumeDistance = 5f;
+
+    [Header("被弾 / 無敵時間")]
+    [Tooltip("命中後、再度得点対象になるまでの秒数")]
+    [SerializeField, Min(0.1f)] float enemyInvulnerabilityDuration = 1f;
+    [Tooltip("無敵時間中の回転速度")]
+    [SerializeField, Range(10, 100)] int enemyInvulnerabilitySpinSpeed = 70;
 
     void Awake()
     {
@@ -258,12 +278,14 @@ public class shotGame_GameManager : MonoBehaviour
             return;
         }
 
-        player0_cube = FindCubeByAddress(cubes, Player0Address, nameof(player0_cube));
-        player1_cube = FindCubeByAddress(cubes, Player1Address, nameof(player1_cube));
-        enemy0_player0_cube = FindCubeByAddress(cubes, Enemy0Player0Address, nameof(enemy0_player0_cube));
-        enemy1_player0_cube = FindCubeByAddress(cubes, Enemy1Player0Address, nameof(enemy1_player0_cube));
-        enemy0_player1_cube = FindCubeByAddress(cubes, Enemy0Player1Address, nameof(enemy0_player1_cube));
-        enemy1_player1_cube = FindCubeByAddress(cubes, Enemy1Player1Address, nameof(enemy1_player1_cube));
+        if (IsSimulatorConnection())
+        {
+            AssignCubesByConnectionOrder(cubes);
+        }
+        else
+        {
+            AssignCubesByAddress(cubes);
+        }
 
         if (!AllRolesAssigned())
         {
@@ -282,14 +304,9 @@ public class shotGame_GameManager : MonoBehaviour
         player0_cube.buttonCallback.AddListener(Player0ButtonListenerKey, OnPlayerButtonChanged);
         player1_cube.buttonCallback.AddListener(Player1ButtonListenerKey, OnPlayerButtonChanged);
 
-        foreach (Cube enemy in allEnemies)
-        {
-            enemy.targetMoveCallback.AddListener(HitReactionListenerKey, OnHitRotationCompleted);
-        }
-
         SetEnemyRoleLeds();
-        cubesReady = true;
-        Debug.Log("[Cube割り当て] 6台すべての役割を設定しました。");
+        PrepareEnemiesForGameStart();
+        Debug.Log("[Cube割り当て] 6台の役割を設定しました。スタート前の敵移動は停止しています。");
     }
 
     Cube FindCubeByAddress(Cube[] cubes, string address, string roleName)
@@ -304,6 +321,52 @@ public class shotGame_GameManager : MonoBehaviour
 
         Debug.LogError($"[Cube割り当て] {roleName} のCubeが見つかりません。Address={address}");
         return null;
+    }
+
+    bool IsSimulatorConnection()
+    {
+        return connectType == ConnectType.Simulator
+            || (connectType == ConnectType.Auto
+                && CubeScanner.actualTypeOfAuto == ConnectType.Simulator);
+    }
+
+    void AssignCubesByConnectionOrder(Cube[] cubes)
+    {
+        player0_cube = cubes[0];
+        player1_cube = cubes[1];
+        enemy0_player0_cube = cubes[2];
+        enemy1_player0_cube = cubes[3];
+        enemy0_player1_cube = cubes[4];
+        enemy1_player1_cube = cubes[5];
+
+        Debug.Log("[Cube割り当て] Simulator接続のため、BLEアドレスを使わず接続順で役割を設定しました。");
+        LogCubeAssignment(nameof(player0_cube), player0_cube);
+        LogCubeAssignment(nameof(player1_cube), player1_cube);
+        LogCubeAssignment(nameof(enemy0_player0_cube), enemy0_player0_cube);
+        LogCubeAssignment(nameof(enemy1_player0_cube), enemy1_player0_cube);
+        LogCubeAssignment(nameof(enemy0_player1_cube), enemy0_player1_cube);
+        LogCubeAssignment(nameof(enemy1_player1_cube), enemy1_player1_cube);
+    }
+
+    void AssignCubesByAddress(Cube[] cubes)
+    {
+        player0_cube = FindCubeByAddress(cubes, Player0Address, nameof(player0_cube));
+        player1_cube = FindCubeByAddress(cubes, Player1Address, nameof(player1_cube));
+        enemy0_player0_cube = FindCubeByAddress(cubes, Enemy0Player0Address, nameof(enemy0_player0_cube));
+        enemy1_player0_cube = FindCubeByAddress(cubes, Enemy1Player0Address, nameof(enemy1_player0_cube));
+        enemy0_player1_cube = FindCubeByAddress(cubes, Enemy0Player1Address, nameof(enemy0_player1_cube));
+        enemy1_player1_cube = FindCubeByAddress(cubes, Enemy1Player1Address, nameof(enemy1_player1_cube));
+    }
+
+    void LogCubeAssignment(string roleName, Cube cube)
+    {
+        if (cube == null)
+        {
+            Debug.LogWarning($"[Cube割り当て] {roleName} = null");
+            return;
+        }
+
+        Debug.Log($"[Cube割り当て] {roleName} = {cube.localName} / {cube.addr}");
     }
 
     bool AllRolesAssigned()
@@ -321,7 +384,14 @@ public class shotGame_GameManager : MonoBehaviour
         UpdateBgm();
         UpdateTimer();
 
-        if (!isGameRunning || cm == null || allEnemies == null) return;
+        if (cm == null || allEnemies == null) return;
+
+        if (!isGameRunning)
+        {
+            return;
+        }
+
+        UpdateEnemyFormationPattern();
 
         foreach (Cube enemy in allEnemies)
         {
@@ -329,23 +399,11 @@ public class shotGame_GameManager : MonoBehaviour
 
             if (activeHitReactions.TryGetValue(enemy, out HitReactionState hitState))
             {
-                if (hitState.phase == HitReactionPhase.Rotating) continue;
+                if (Time.time < hitState.invulnerableUntil) continue;
 
-                bool sentTranslationCommand = MoveEnemy(enemy);
-                if (sentTranslationCommand && !hitState.resumeCommandSent)
-                {
-                    hitState.resumePosition = enemy.pos;
-                    hitState.resumeCommandSent = true;
-                }
-
-                // 命令送信だけではなく、実機の座標変化を確認してから再弾を許可する。
-                if (hitState.resumeCommandSent
-                    && Vector2.Distance(hitState.resumePosition, enemy.pos) >= hitResumeDistance)
-                {
-                    activeHitReactions.Remove(enemy);
-                    Debug.Log($"{enemy.localName}が再移動したため、被弾判定を再開しました。");
-                }
-
+                activeHitReactions.Remove(enemy);
+                MoveEnemy(enemy);
+                Debug.Log($"{enemy.localName}の1秒間の無敵時間が終了しました。");
                 continue;
             }
 
@@ -396,7 +454,14 @@ public class shotGame_GameManager : MonoBehaviour
             return MoveTowardDirection(enemy, enemy.pos - nearestEnemy.pos, false);
         }
 
-        return MoveAcrossMat(enemy, enemyIndex);
+        if (enemyIndex < 0 || enemyIndex >= enemyFormationTargets.Length) return false;
+
+        return MoveTowardDirection(
+            enemy,
+            enemyFormationTargets[enemyIndex] - enemy.pos,
+            false,
+            0f,
+            enemySpeed);
     }
 
     bool MoveTowardDirection(
@@ -433,67 +498,217 @@ public class shotGame_GameManager : MonoBehaviour
         return true;
     }
 
-    bool MoveAcrossMat(Cube enemy, int enemyIndex)
+    void PrepareEnemiesForGameStart()
     {
-        Vector2 patrolTarget = GetPatrolTarget(enemy, enemyIndex);
+        cubesReady = true;
+        enemyFormationState = EnemyFormationState.WaitingForGame;
+        CaptureFormationAxes();
 
-        // 目的地へ直進し続けないよう、機体ごとに位相をずらして蛇行させる。
-        float phaseOffset = Mathf.Max(0, enemyIndex) * 0.7f;
-        float period = Mathf.Max(1f, patrolSwervePeriod);
-        float swerve = Mathf.Sin((Time.time + phaseOffset) * Mathf.PI * 2f / period)
-            * patrolSwerveAngle;
-
-        return MoveTowardDirection(
-            enemy,
-            patrolTarget - enemy.pos,
-            false,
-            swerve,
-            enemySpeed);
+        // スタート前は敵を動かさない。最初の目標だけ準備しておく。
+        SetLayeredFormationTargets(
+            formationLongitudinalOffset,
+            -formationLongitudinalOffset,
+            0f);
+        StopAllEnemies();
     }
 
-    Vector2 GetPatrolTarget(Cube enemy, int enemyIndex)
+    void BeginNextEnemyFormationPattern()
     {
-        if (!patrolTargetIndices.TryGetValue(enemy, out int targetIndex))
+        CaptureFormationAxes();
+
+        int patternCount = Enum.GetValues(typeof(EnemyFormationPattern)).Length;
+        int nextPatternIndex = UnityEngine.Random.Range(0, patternCount);
+        if (patternCount > 1 && nextPatternIndex == previousFormationPatternIndex)
         {
-            // 初期目的地を全台で分散させる。
-            targetIndex = PositiveModulo(Mathf.Max(0, enemyIndex) * 3, PatrolTargetCount);
-            patrolTargetIndices[enemy] = targetIndex;
+            nextPatternIndex = (nextPatternIndex + UnityEngine.Random.Range(1, patternCount))
+                % patternCount;
         }
 
-        Vector2 patrolTarget = GetPatrolTargetPosition(targetIndex);
-        if (Vector2.Distance(enemy.pos, patrolTarget) <= patrolTargetReachDistance)
-        {
-            // 全台が同じ巡回方向で、異なる区間を移動するため、正面衝突しにくい。
-            targetIndex = PositiveModulo(targetIndex + 1, PatrolTargetCount);
-            patrolTargetIndices[enemy] = targetIndex;
-            patrolTarget = GetPatrolTargetPosition(targetIndex);
-        }
+        previousFormationPatternIndex = nextPatternIndex;
+        currentFormationPattern = (EnemyFormationPattern)nextPatternIndex;
+        formationPatternStartedAt = Time.time;
+        enemyFormationState = EnemyFormationState.Running;
+        UpdateFormationTargets(currentFormationPattern, 0f);
 
-        return patrolTarget;
+        Debug.Log($"[敵編隊] パターン開始: {currentFormationPattern}");
     }
 
-    Vector2 GetPatrolTargetPosition(int targetIndex)
+    void UpdateEnemyFormationPattern()
     {
-        float inset = matSafetyMargin + edgeLookAheadDistance + 2f;
+        if (enemyFormationState != EnemyFormationState.Running)
+        {
+            BeginNextEnemyFormationPattern();
+            return;
+        }
+
+        float elapsed = Time.time - formationPatternStartedAt;
+        if (elapsed >= formationPatternDuration)
+        {
+            BeginNextEnemyFormationPattern();
+            return;
+        }
+
+        UpdateFormationTargets(currentFormationPattern, elapsed);
+    }
+
+    void UpdateFormationTargets(EnemyFormationPattern pattern, float elapsed)
+    {
+        float cycle = Mathf.Max(2f, formationCycleDuration);
+        float phase = elapsed * Mathf.PI * 2f / cycle;
+
+        switch (pattern)
+        {
+            case EnemyFormationPattern.CoffeeCup:
+            {
+                // 大きな周回に小さな内側回転を足し、コーヒーカップのように動かす。
+                SetCoffeeCupTargets(phase);
+                break;
+            }
+            case EnemyFormationPattern.WideCircle:
+            {
+                // 4体がマット全体の楕円上を90度ずつずれて周回する。
+                SetWideCircleTargets(phase);
+                break;
+            }
+            default:
+            {
+                // マット幅を使う八の字。交点で重ならないよう、4体の位相を非等間隔にずらす。
+                SetFigureEightTargets(phase);
+                break;
+            }
+        }
+    }
+
+    void SetLayeredFormationTargets(float blueLongitudinal, float redLongitudinal,
+        float relativeLateralOffset)
+    {
+        SetFormationTarget(0, blueLongitudinal, formationLaneOffset + relativeLateralOffset);
+        SetFormationTarget(1, blueLongitudinal, -formationLaneOffset + relativeLateralOffset);
+        SetFormationTarget(2, redLongitudinal, formationLaneOffset - relativeLateralOffset);
+        SetFormationTarget(3, redLongitudinal, -formationLaneOffset - relativeLateralOffset);
+    }
+
+    void SetCoffeeCupTargets(float phase)
+    {
+        for (int i = 0; i < EnemyCount; i++)
+        {
+            float slotAngle = GetFormationSlotAngle(i);
+            float orbitAngle = phase + slotAngle;
+            float cupAngle = phase * 2.35f + slotAngle * 1.5f;
+
+            SetFormationTarget(
+                i,
+                Mathf.Cos(orbitAngle) * formationLongitudinalOffset
+                    + Mathf.Cos(cupAngle) * formationGateOffset,
+                Mathf.Sin(orbitAngle) * formationLaneOffset
+                    + Mathf.Sin(cupAngle) * formationGateOffset);
+        }
+    }
+
+    void SetWideCircleTargets(float phase)
+    {
+        for (int i = 0; i < EnemyCount; i++)
+        {
+            float angle = phase + GetFormationSlotAngle(i);
+            SetFormationTarget(
+                i,
+                Mathf.Cos(angle) * formationLongitudinalOffset,
+                Mathf.Sin(angle) * formationLaneOffset);
+        }
+    }
+
+    void SetFigureEightTargets(float phase)
+    {
+        for (int i = 0; i < EnemyCount; i++)
+        {
+            float angle = phase + GetFigureEightPhaseOffset(i);
+
+            SetFormationTarget(
+                i,
+                Mathf.Sin(angle) * formationLongitudinalOffset,
+                Mathf.Sin(angle * 2f) * formationLaneOffset * 0.78f);
+        }
+    }
+
+    float GetFigureEightPhaseOffset(int enemyIndex)
+    {
+        switch (enemyIndex)
+        {
+            case 1:
+                return 3.846f;
+            case 2:
+                return 1.388f;
+            case 3:
+                return 2.457f;
+            default:
+                return 0f;
+        }
+    }
+
+    float GetFormationSlotAngle(int enemyIndex)
+    {
+        switch (enemyIndex % EnemyCount)
+        {
+            case 1:
+                return Mathf.PI * 0.5f;
+            case 2:
+                return Mathf.PI;
+            case 3:
+                return Mathf.PI * 1.5f;
+            default:
+                return 0f;
+        }
+    }
+
+    void SetFormationTarget(int enemyIndex, float longitudinal, float lateral)
+    {
+        if (enemyIndex < 0 || enemyIndex >= enemyFormationTargets.Length) return;
+
+        Vector2 target = GetMatCenter()
+            + formationForwardAxis * (longitudinal * formationLayoutScale)
+            + formationLateralAxis * (lateral * formationLayoutScale);
+        enemyFormationTargets[enemyIndex] = ClampToSafeMat(target);
+    }
+
+    Vector2 ClampToSafeMat(Vector2 position)
+    {
+        float inset = matSafetyMargin;
         float minX = Mathf.Min(matMinX, matMaxX) + inset;
         float maxX = Mathf.Max(matMinX, matMaxX) - inset;
         float minY = Mathf.Min(matMinY, matMaxY) + inset;
         float maxY = Mathf.Max(matMinY, matMaxY) - inset;
-
-        // 対角線移動を含む順番にし、マット全体を横切らせる。
-        switch (PositiveModulo(targetIndex, PatrolTargetCount))
-        {
-            case 0: return new Vector2(minX, minY);
-            case 1: return new Vector2(maxX, maxY);
-            case 2: return new Vector2(minX, maxY);
-            default: return new Vector2(maxX, minY);
-        }
+        return new Vector2(
+            Mathf.Clamp(position.x, minX, maxX),
+            Mathf.Clamp(position.y, minY, maxY));
     }
 
-    int PositiveModulo(int value, int modulus)
+    void CaptureFormationAxes()
     {
-        int result = value % modulus;
-        return result < 0 ? result + modulus : result;
+        Vector2 playerDirection = player1_cube.pos - player0_cube.pos;
+        if (playerDirection.sqrMagnitude < 100f)
+        {
+            playerDirection = Vector2.right;
+        }
+
+        formationForwardAxis = playerDirection.normalized;
+        formationLateralAxis = new Vector2(-formationForwardAxis.y, formationForwardAxis.x);
+
+        float maximumLongitudinal = formationLongitudinalOffset + formationGateOffset;
+        float maximumLateral = formationLaneOffset + formationGateOffset;
+        float requiredHalfWidth = Mathf.Abs(formationForwardAxis.x) * maximumLongitudinal
+            + Mathf.Abs(formationLateralAxis.x) * maximumLateral;
+        float requiredHalfHeight = Mathf.Abs(formationForwardAxis.y) * maximumLongitudinal
+            + Mathf.Abs(formationLateralAxis.y) * maximumLateral;
+        float availableHalfWidth = Mathf.Abs(matMaxX - matMinX) * 0.5f - matSafetyMargin;
+        float availableHalfHeight = Mathf.Abs(matMaxY - matMinY) * 0.5f - matSafetyMargin;
+
+        float widthScale = requiredHalfWidth > 0.01f
+            ? availableHalfWidth / requiredHalfWidth
+            : 1f;
+        float heightScale = requiredHalfHeight > 0.01f
+            ? availableHalfHeight / requiredHalfHeight
+            : 1f;
+        formationLayoutScale = Mathf.Clamp(Mathf.Min(1f, widthScale, heightScale), 0.6f, 1f);
     }
 
     Cube FindNearestEnemy(Cube source, out float nearestDistance)
@@ -598,7 +813,7 @@ public class shotGame_GameManager : MonoBehaviour
             AddPoint(player, -100);
         }
 
-        PlayHitReaction(hitEnemy).Forget();
+        StartHitReaction(hitEnemy);
     }
 
     void AddPoint(Cube player, int amount)
@@ -1007,6 +1222,7 @@ public class shotGame_GameManager : MonoBehaviour
         timerAccumulator = 0f;
         activeHitReactions.Clear();
         isGameRunning = true;
+        BeginNextEnemyFormationPattern();
         PlayGameStartBgm();
 
         UpdatePointTexts();
@@ -1061,6 +1277,7 @@ public class shotGame_GameManager : MonoBehaviour
     void FinishGame()
     {
         isGameRunning = false;
+        enemyFormationState = EnemyFormationState.WaitingForGame;
         activeHitReactions.Clear();
         StopAllEnemies();
         PlayGameEndBgm();
@@ -1320,51 +1537,30 @@ public class shotGame_GameManager : MonoBehaviour
         startRetryButtonTween = null;
     }
 
-    async UniTask PlayHitReaction(Cube enemy)
+    void StartHitReaction(Cube enemy)
     {
         if (enemy == null) return;
 
-        // FireLaser側で得点を防ぐが、非同期の競合にも備える。
+        // FireLaser側で得点を防ぐが、同一フレーム内の重複命中にも備える。
         if (activeHitReactions.ContainsKey(enemy))
         {
             return;
         }
 
-        int configId = GetNextHitReactionConfigId();
+        float invulnerabilityDuration = Mathf.Max(0.1f, enemyInvulnerabilityDuration);
         activeHitReactions[enemy] = new HitReactionState
         {
-            configId = configId,
-            phase = HitReactionPhase.Rotating,
-            resumePosition = enemy.pos,
-            resumeCommandSent = false
+            invulnerableUntil = Time.time + invulnerabilityDuration
         };
 
-        enemy.Move(0, 0, 100, Cube.ORDER_TYPE.Strong);
-        enemy.TargetMove(
-            targetX: -1,
-            targetY: -1,
-            targetAngle: 360,
-            configID: configId,
-            timeOut: 3,
-            targetMoveType: Cube.TargetMoveType.RotatingMove,
-            maxSpd: 80,
-            targetSpeedType: Cube.TargetSpeedType.UniformSpeed,
-            targetRotationType: Cube.TargetRotationType.RelativeClockwise,
-            order: Cube.ORDER_TYPE.Strong
-        );
+        // 回転完了通知に復活時間を依存させず、全ての敵を同じ1秒間回し続ける。
+        int spinDurationMs = Mathf.CeilToInt(invulnerabilityDuration * 1000f);
+        int spinSpeed = Mathf.Clamp(enemyInvulnerabilitySpinSpeed, 10, 100);
+        enemy.Move(spinSpeed, -spinSpeed, spinDurationMs, Cube.ORDER_TYPE.Strong);
+
         // 被弾後もデバッグ用の担当色を維持する。
         TurnOnEnemyRoleLed(enemy);
         enemy.PlayPresetSound(2, 255, Cube.ORDER_TYPE.Strong);
-
-        await UniTask.Delay(3500);
-
-        if (activeHitReactions.TryGetValue(enemy, out HitReactionState hitState)
-            && hitState.configId == configId
-            && hitState.phase == HitReactionPhase.Rotating)
-        {
-            enemy.Move(0, 0, 100, Cube.ORDER_TYPE.Strong);
-            BeginWaitingForMovement(enemy, hitState);
-        }
     }
 
     void SetEnemyRoleLeds()
@@ -1388,31 +1584,6 @@ public class shotGame_GameManager : MonoBehaviour
         {
             enemy.TurnLedOn(255, 0, 0, 0, Cube.ORDER_TYPE.Strong);
         }
-    }
-
-    int GetNextHitReactionConfigId()
-    {
-        int configId = nextHitReactionConfigId;
-        nextHitReactionConfigId++;
-        if (nextHitReactionConfigId > 199) nextHitReactionConfigId = 100;
-        return configId;
-    }
-
-    void OnHitRotationCompleted(Cube enemy, int configId, Cube.TargetMoveRespondType response)
-    {
-        if (!activeHitReactions.TryGetValue(enemy, out HitReactionState hitState)) return;
-        if (hitState.configId != configId) return;
-
-        BeginWaitingForMovement(enemy, hitState);
-    }
-
-    void BeginWaitingForMovement(Cube enemy, HitReactionState hitState)
-    {
-        if (hitState.phase == HitReactionPhase.WaitingForMovement) return;
-
-        hitState.phase = HitReactionPhase.WaitingForMovement;
-        hitState.resumePosition = enemy.pos;
-        hitState.resumeCommandSent = false;
     }
 
     void StopAllEnemies()
@@ -1441,13 +1612,6 @@ public class shotGame_GameManager : MonoBehaviour
         if (player1_cube != null)
         {
             player1_cube.buttonCallback.RemoveListener(Player1ButtonListenerKey);
-        }
-        if (allEnemies == null) return;
-
-        foreach (Cube enemy in allEnemies)
-        {
-            if (enemy == null) continue;
-            enemy.targetMoveCallback.RemoveListener(HitReactionListenerKey);
         }
     }
 }
