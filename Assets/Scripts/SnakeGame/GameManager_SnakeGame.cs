@@ -1,5 +1,6 @@
 using UnityEngine;
 using toio;
+using System.Linq;
 
 public class GameManager_SnakeGame : MonoBehaviour
 {
@@ -9,6 +10,10 @@ public class GameManager_SnakeGame : MonoBehaviour
     [Header("Cube ID")]
     public string controller_id = "08FC46E9-1BC9-43D1-E360-A18C7D226902";
     public string snake_id = "8EB87781-3EDE-64ED-C989-8F8407E8166B";
+    public string snake_id_1 = "34A1975D-97F5-6FDF-BA85-A950886C2B4C";
+    public string snake_id_2 = "2363D218-9D33-BC01-6EFD-FD966F900FA3";
+    public string snake_id_3 = "A201BF83-C425-BD5A-658A-F86C66453C78";
+    public string snake_id_4 = "36406584-9463-4711-B7AC-9732C0E33C1B";
 
     [Header("スネーク操作")]
     public int forwardSpeed = 45;
@@ -20,6 +25,7 @@ public class GameManager_SnakeGame : MonoBehaviour
     [Header("Cube")]
     Cube controller_c;
     Cube[] snake_c;
+    const int SnakeCount = 5;
     int lastMoveLeft = int.MinValue;
     int lastMoveRight = int.MinValue;
     float targetAngle;
@@ -27,15 +33,32 @@ public class GameManager_SnakeGame : MonoBehaviour
 
     async void Start()
     {
-        snake_c = new Cube[1];
+        snake_c = new Cube[SnakeCount];
 
         CubeScanner scanner = new CubeScanner(connectType);
         BLEPeripheralInterface[] peripherals = await scanner.NearScan(20, 5f);
 
-        BLEPeripheralInterface controllerPeripheral = FindPeripheralById(peripherals, controller_id, nameof(controller_id));
-        BLEPeripheralInterface snakePeripheral = FindPeripheralById(peripherals, snake_id, nameof(snake_id));
+        if(peripherals == null)
+        {
+            Debug.LogError("Cubeのスキャンに失敗しました。");
+            return;
+        }
 
-        if (controllerPeripheral == null || snakePeripheral == null)
+        BLEPeripheralInterface controllerPeripheral = peripherals.FirstOrDefault(peripheral =>
+            peripheral != null && string.Equals(peripheral.device_address, controller_id, System.StringComparison.OrdinalIgnoreCase));
+        BLEPeripheralInterface snakePeripheral = peripherals.FirstOrDefault(peripheral =>
+            peripheral != null && string.Equals(peripheral.device_address, snake_id, System.StringComparison.OrdinalIgnoreCase));
+        BLEPeripheralInterface snakePeripheral1 = peripherals.FirstOrDefault(peripheral =>
+            peripheral != null && string.Equals(peripheral.device_address, snake_id_1, System.StringComparison.OrdinalIgnoreCase));
+        BLEPeripheralInterface snakePeripheral2 = peripherals.FirstOrDefault(peripheral =>
+            peripheral != null && string.Equals(peripheral.device_address, snake_id_2, System.StringComparison.OrdinalIgnoreCase));
+        BLEPeripheralInterface snakePeripheral3 = peripherals.FirstOrDefault(peripheral =>
+            peripheral != null && string.Equals(peripheral.device_address, snake_id_3, System.StringComparison.OrdinalIgnoreCase));
+        BLEPeripheralInterface snakePeripheral4 = peripherals.FirstOrDefault(peripheral =>
+            peripheral != null && string.Equals(peripheral.device_address, snake_id_4, System.StringComparison.OrdinalIgnoreCase));
+
+        if (controllerPeripheral == null || snakePeripheral == null || snakePeripheral1 == null || snakePeripheral2 == null
+            || snakePeripheral3 == null || snakePeripheral4 == null)
         {
             Debug.LogError("指定されたIDのCubeが見つかりませんでした。");
             return;
@@ -44,8 +67,12 @@ public class GameManager_SnakeGame : MonoBehaviour
         CubeConnecter connecter = new CubeConnecter(connectType);
         controller_c = await connecter.Connect(controllerPeripheral);
         snake_c[0] = await connecter.Connect(snakePeripheral);
+        snake_c[1] = await connecter.Connect(snakePeripheral1);
+        snake_c[2] = await connecter.Connect(snakePeripheral2);
+        snake_c[3] = await connecter.Connect(snakePeripheral3);
+        snake_c[4] = await connecter.Connect(snakePeripheral4);
 
-        if (controller_c == null || snake_c[0] == null)
+        if (controller_c == null || snake_c.Any(cube => cube == null))
         {
             Debug.LogError("指定されたIDのCube接続に失敗しました。");
             return;
@@ -53,8 +80,6 @@ public class GameManager_SnakeGame : MonoBehaviour
 
         targetAngle = controller_c.angle;
         hasTargetAngle = true;
-        Debug.Log("controller_c : " + controller_c.id);
-        Debug.Log("snake_c : " + snake_c[0].id);
     }
 
     void Update()
@@ -112,20 +137,4 @@ public class GameManager_SnakeGame : MonoBehaviour
         lastMoveRight = right;
     }
 
-    BLEPeripheralInterface FindPeripheralById(BLEPeripheralInterface[] peripherals, string targetId, string roleName)
-    {
-        if(peripherals == null) return null;
-
-        foreach(BLEPeripheralInterface peripheral in peripherals)
-        {
-            if(peripheral == null) continue;
-            if(!string.Equals(peripheral.device_address, targetId, System.StringComparison.OrdinalIgnoreCase)) continue;
-
-            Debug.Log(roleName + " : " + peripheral.device_name + " / " + peripheral.device_address);
-            return peripheral;
-        }
-
-        Debug.LogError(roleName + " が見つかりません。ID=" + targetId);
-        return null;
-    }
 }
