@@ -7,6 +7,7 @@ using toio;
 using Cysharp.Threading.Tasks;
 using TMPro;
 using DG.Tweening;
+using toio.Simulator;
 
 public class shotGame_GameManager : MonoBehaviour
 {
@@ -232,6 +233,15 @@ public class shotGame_GameManager : MonoBehaviour
     [SerializeField, Min(12f)] float matSafetyMargin = 15f;
     [Tooltip("進行方向のこの距離先が安全範囲外なら事前に旋回する")]
     [SerializeField, Min(10f)] float edgeLookAheadDistance = 12f;
+
+    [Header("マットGizmo")]
+    [SerializeField] bool showMatGizmo = true;
+    [Tooltip("Simulator上のMat。未指定の場合はScene内のMatを自動検索し、見つからなければSDKのデフォルト変換で描画する")]
+    [SerializeField] Mat matGizmoTarget;
+    [SerializeField] Color matGizmoOuterColor = new Color(0f, 0.75f, 1f, 1f);
+    [SerializeField] Color matGizmoSafeColor = new Color(0.1f, 1f, 0.25f, 1f);
+    [SerializeField] Color matGizmoCenterColor = new Color(1f, 0.85f, 0f, 1f);
+    [SerializeField, Min(0f)] float matGizmoHeightOffset = 0.01f;
 
     [Header("被弾 / 無敵時間")]
     [Tooltip("命中後、再度得点対象になるまでの秒数")]
@@ -755,6 +765,61 @@ public class shotGame_GameManager : MonoBehaviour
     Vector2 GetMatCenter()
     {
         return new Vector2((matMinX + matMaxX) * 0.5f, (matMinY + matMaxY) * 0.5f);
+    }
+
+    void OnDrawGizmos()
+    {
+        if (!showMatGizmo) return;
+
+        Mat targetMat = GetMatGizmoTarget();
+
+        float minX = Mathf.Min(matMinX, matMaxX);
+        float maxX = Mathf.Max(matMinX, matMaxX);
+        float minY = Mathf.Min(matMinY, matMaxY);
+        float maxY = Mathf.Max(matMinY, matMaxY);
+
+        DrawMatGizmoRect(targetMat, minX, maxX, minY, maxY, matGizmoOuterColor);
+
+        float safeMinX = minX + matSafetyMargin;
+        float safeMaxX = maxX - matSafetyMargin;
+        float safeMinY = minY + matSafetyMargin;
+        float safeMaxY = maxY - matSafetyMargin;
+        if (safeMinX < safeMaxX && safeMinY < safeMaxY)
+        {
+            DrawMatGizmoRect(targetMat, safeMinX, safeMaxX, safeMinY, safeMaxY, matGizmoSafeColor);
+        }
+
+        Gizmos.color = matGizmoCenterColor;
+        Vector3 center = MatCoordToGizmoWorld(targetMat, (minX + maxX) * 0.5f, (minY + maxY) * 0.5f);
+        const float centerMarkSize = 0.035f;
+        Gizmos.DrawLine(center + Vector3.left * centerMarkSize, center + Vector3.right * centerMarkSize);
+        Gizmos.DrawLine(center + Vector3.forward * centerMarkSize, center + Vector3.back * centerMarkSize);
+        Gizmos.DrawSphere(center, centerMarkSize * 0.35f);
+    }
+
+    Mat GetMatGizmoTarget()
+    {
+        if (matGizmoTarget != null) return matGizmoTarget;
+        return FindObjectOfType<Mat>();
+    }
+
+    void DrawMatGizmoRect(Mat targetMat, float minX, float maxX, float minY, float maxY, Color color)
+    {
+        Vector3 bottomLeft = MatCoordToGizmoWorld(targetMat, minX, minY);
+        Vector3 bottomRight = MatCoordToGizmoWorld(targetMat, maxX, minY);
+        Vector3 topRight = MatCoordToGizmoWorld(targetMat, maxX, maxY);
+        Vector3 topLeft = MatCoordToGizmoWorld(targetMat, minX, maxY);
+
+        Gizmos.color = color;
+        Gizmos.DrawLine(bottomLeft, bottomRight);
+        Gizmos.DrawLine(bottomRight, topRight);
+        Gizmos.DrawLine(topRight, topLeft);
+        Gizmos.DrawLine(topLeft, bottomLeft);
+    }
+
+    Vector3 MatCoordToGizmoWorld(Mat targetMat, float x, float y)
+    {
+        return Mat.MatCoord2UnityCoord(x, y, targetMat) + Vector3.up * matGizmoHeightOffset;
     }
 
     void OnPlayerButtonChanged(Cube player)
