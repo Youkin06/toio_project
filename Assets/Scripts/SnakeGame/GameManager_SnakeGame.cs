@@ -10,6 +10,7 @@ public class GameManager_SnakeGame : MonoBehaviour
     enum SnakeGameState
     {
         Running,
+        AlignNewHead,
         ReleaseAfterHeadSwitch
     }
 
@@ -97,6 +98,8 @@ public class GameManager_SnakeGame : MonoBehaviour
     int[] lastMoveRight;
 
     SnakeGameState state = SnakeGameState.Running;
+    int aligningHeadIndex = -1;
+    float alignTargetAngle;
     float stateStartedAt;
     float targetAngle;
     bool hasTargetAngle;
@@ -173,6 +176,9 @@ public class GameManager_SnakeGame : MonoBehaviour
             case SnakeGameState.Running:
                 UpdateRunning();
                 break;
+            case SnakeGameState.AlignNewHead:
+                UpdateAlignNewHead();
+                break;
             case SnakeGameState.ReleaseAfterHeadSwitch:
                 UpdateReleaseAfterHeadSwitch();
                 break;
@@ -185,6 +191,7 @@ public class GameManager_SnakeGame : MonoBehaviour
         snakeOrder.Add(0);
 
         nextJoinIndex = 1;
+        aligningHeadIndex = -1;
         state = SnakeGameState.Running;
 
         targetAngle = controller_c.angle;
@@ -243,7 +250,50 @@ public class GameManager_SnakeGame : MonoBehaviour
 
         StopAllSnakes();
 
-        int newHeadIndex = nextJoinIndex;
+        aligningHeadIndex = nextJoinIndex;
+        alignTargetAngle = head.angle;
+        state = SnakeGameState.AlignNewHead;
+        InvalidateMoveCache(aligningHeadIndex);
+
+        if(debugHeadSwitch)
+        {
+            Debug.Log($"Head alignment start: snake{aligningHeadIndex}, targetAngle={alignTargetAngle:F1}, distance={distance:F1}");
+        }
+
+        return true;
+    }
+
+    void UpdateAlignNewHead()
+    {
+        if(aligningHeadIndex != nextJoinIndex || !IsValidSnakeIndex(aligningHeadIndex))
+        {
+            CancelHeadAlignment();
+            return;
+        }
+
+        StopAllSnakesExcept(aligningHeadIndex);
+
+        if(!CanAlignUnjoinedSnake(aligningHeadIndex))
+        {
+            StopSnake(aligningHeadIndex);
+            return;
+        }
+
+        float angleDiff = Mathf.DeltaAngle(snake_c[aligningHeadIndex].angle, alignTargetAngle);
+        if(Mathf.Abs(angleDiff) <= angleTolerance)
+        {
+            CompleteHeadAlignment();
+            return;
+        }
+
+        RotateUnjoinedSnakeInPlace(aligningHeadIndex, angleDiff);
+    }
+
+    void CompleteHeadAlignment()
+    {
+        int newHeadIndex = aligningHeadIndex;
+        StopSnake(newHeadIndex);
+
         if(!snakeOrder.Contains(newHeadIndex))
         {
             snakeOrder.Insert(0, newHeadIndex);
@@ -258,6 +308,7 @@ public class GameManager_SnakeGame : MonoBehaviour
         hasTargetAngle = true;
         ResetHeadTrailToCurrentOrder();
         RefreshSnakeNavigatorRelations();
+        aligningHeadIndex = -1;
         state = SnakeGameState.ReleaseAfterHeadSwitch;
         stateStartedAt = Time.time;
         StopAllSnakes();
@@ -266,8 +317,13 @@ public class GameManager_SnakeGame : MonoBehaviour
         {
             Debug.Log($"Head switch complete: {string.Join(" -> ", snakeOrder.Select(index => $"snake{index}"))}");
         }
+    }
 
-        return true;
+    void CancelHeadAlignment()
+    {
+        aligningHeadIndex = -1;
+        state = SnakeGameState.Running;
+        StopAllSnakes();
     }
 
     void UpdateReleaseAfterHeadSwitch()
@@ -660,6 +716,14 @@ public class GameManager_SnakeGame : MonoBehaviour
         return IsInsideMat(snake_c[snakeIndex].pos);
     }
 
+    bool CanAlignUnjoinedSnake(int snakeIndex)
+    {
+        if(!IsSnakeGrounded(snakeIndex)) return false;
+        if(!stopSnakeOutsideStage) return true;
+
+        return IsInsideMat(snake_c[snakeIndex].pos);
+    }
+
     bool IsControllerUsable()
     {
         if(controller_c == null) return false;
@@ -742,6 +806,15 @@ public class GameManager_SnakeGame : MonoBehaviour
         }
     }
 
+    void StopAllSnakesExcept(int movingIndex)
+    {
+        for(int i = 0; i < SnakeCount; i++)
+        {
+            if(i == movingIndex) continue;
+            StopSnake(i);
+        }
+    }
+
     bool IsSnakeJoined(int snakeIndex)
     {
         return snakeOrder.Contains(snakeIndex);
@@ -796,6 +869,29 @@ public class GameManager_SnakeGame : MonoBehaviour
         if(lastMoveLeft == null || lastMoveRight == null) return;
         lastMoveLeft[snakeIndex] = left;
         lastMoveRight[snakeIndex] = right;
+    }
+
+    void RotateUnjoinedSnakeInPlace(int snakeIndex, float angleDiff)
+    {
+        if(!IsValidSnakeIndex(snakeIndex)) return;
+        if(snake_c == null || snake_c[snakeIndex] == null) return;
+
+        int turn = Mathf.RoundToInt(Mathf.Clamp(angleDiff * steeringGain, -turnSpeed, turnSpeed));
+        int minimumTurn = Mathf.Min(Mathf.Abs(turnSpeed), 8);
+        if(minimumTurn > 0 && Mathf.Abs(turn) < minimumTurn)
+        {
+            turn = angleDiff > 0f ? minimumTurn : -minimumTurn;
+        }
+
+        if(lastMoveLeft != null && lastMoveRight != null
+            && turn == lastMoveLeft[snakeIndex] && -turn == lastMoveRight[snakeIndex]) return;
+        if(!CanSendMoveOrder(snakeIndex)) return;
+
+        snake_c[snakeIndex].Move(turn, -turn, 0, Cube.ORDER_TYPE.Strong);
+
+        if(lastMoveLeft == null || lastMoveRight == null) return;
+        lastMoveLeft[snakeIndex] = turn;
+        lastMoveRight[snakeIndex] = -turn;
     }
 
     void InvalidateMoveCache(int snakeIndex)
