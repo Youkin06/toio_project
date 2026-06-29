@@ -292,6 +292,33 @@ MonoBehaviour:
   steeringGain: 0.4
   angleTolerance: 15
   controllerAngleTolerance: 10
+  matMinX: 48
+  matMaxX: 446.6
+  matMinY: 57.8
+  matMaxY: 451.1
+  matSafetyMargin: 15
+  keepSnakeInsideMat: 0
+  stopSnakeOutsideStage: 1
+  requireControllerInsideStage: 1
+  showStageGizmo: 1
+  stageGizmoTarget: {fileID: 0}
+  stageGizmoOuterColor: {r: 0, g: 0.75, b: 1, a: 1}
+  stageGizmoSafeColor: {r: 0.1, g: 1, b: 0.25, a: 1}
+  stageGizmoCenterColor: {r: 1, g: 0.85, b: 0, a: 1}
+  stageGizmoHeightOffset: 0.01
+  cubeSize: 32
+  joinDistance: 42
+  releaseAfterHeadSwitchSeconds: 0.15
+  segmentSpacing: 58
+  minimumSegmentClearance: 40
+  followTargetTolerance: 10
+  trailSampleDistance: 6
+  trailKeepMargin: 120
+  bodyNavigatorMode: 0
+  bodyFollowMaxSpeed: 45
+  bodyFollowRotateTime: 250
+  useNavigatorPrediction: 1
+  debugHeadSwitch: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
